@@ -35,6 +35,7 @@ import org.eclipse.core.filesystem.EFS;
 import org.eclipse.core.filesystem.IFileStore;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.e4.ui.css.swt.theme.ITheme;
 import org.eclipse.e4.ui.css.swt.theme.IThemeEngine;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.e4.ui.services.IStylingEngine;
@@ -506,12 +507,13 @@ public class UiUtils {
   public static boolean isDarkTheme() {
     IThemeEngine engine = PlatformUI.getWorkbench().getService(IThemeEngine.class);
     if (engine != null) {
-      String themeCssUri = engine.getActiveTheme().getId();
-      if (themeCssUri.toLowerCase().contains("dark")) {
-        return true;
+      ITheme activeTheme = engine.getActiveTheme();
+      if (activeTheme != null) {
+        String themeCssUri = activeTheme.getId();
+        if (themeCssUri != null && themeCssUri.toLowerCase().contains("dark")) {
+          return true;
+        }
       }
-    } else {
-      CopilotCore.LOGGER.info("Theme engine not available. Defaulting to light theme.");
     }
     return false;
   }
