@@ -31,6 +31,9 @@ import com.microsoft.copilot.eclipse.core.lsp.protocol.LanguageModelToolInformat
 import com.microsoft.copilot.eclipse.core.lsp.protocol.LanguageModelToolResult;
 import com.microsoft.copilot.eclipse.core.lsp.protocol.LanguageModelToolResult.ToolInvocationStatus;
 import com.microsoft.copilot.eclipse.core.lsp.protocol.RegisterToolsParams;
+import com.microsoft.copilot.eclipse.core.runtime.IRuntimeInspectionService;
+import com.microsoft.copilot.eclipse.core.runtime.RuntimeInspectionServiceManager;
+import com.microsoft.copilot.eclipse.core.runtime.RuntimeToolDescriptor;
 import com.microsoft.copilot.eclipse.core.utils.JdtUtils;
 import com.microsoft.copilot.eclipse.core.utils.PlatformUtils;
 import com.microsoft.copilot.eclipse.terminal.api.IRunInTerminalTool;
@@ -49,6 +52,7 @@ import com.microsoft.copilot.eclipse.ui.chat.tools.GetErrorsTool;
 import com.microsoft.copilot.eclipse.ui.chat.tools.JavaDebuggerToolAdapter;
 import com.microsoft.copilot.eclipse.ui.chat.tools.RunInTerminalToolAdapter;
 import com.microsoft.copilot.eclipse.ui.chat.tools.RunInTerminalToolAdapter.GetTerminalOutputTool;
+import com.microsoft.copilot.eclipse.ui.chat.tools.RuntimeProviderTool;
 import com.microsoft.copilot.eclipse.ui.dialogs.MissingTerminalDependenciesDialog;
 import com.microsoft.copilot.eclipse.ui.utils.SwtUtils;
 
@@ -61,6 +65,7 @@ public class AgentToolService implements ToolInvocationListener, TerminalService
 
   protected CopilotLanguageServerConnection lsConnection;
   private volatile boolean terminalToolsRegistered = false;
+  private RuntimeInspectionServiceManager.RuntimeServiceListener runtimeServiceListener;
   private List<LanguageModelToolInformation> cachedBuiltInTools;
   private final ConfirmationService confirmationService;
   private final AttachedFileRegistry attachedFileRegistry;
@@ -116,6 +121,9 @@ public class AgentToolService implements ToolInvocationListener, TerminalService
       registerTool(new JavaDebuggerToolAdapter());
     }
 
+    // Runtime inspection tools - registered when a runtime provider (e.g. CSIDE) becomes available
+    registerRuntimeInspectionTools();
+
     // Register the tools to the language server and cache the result
     registerToolWithServer();
 
@@ -146,6 +154,64 @@ public class AgentToolService implements ToolInvocationListener, TerminalService
   private void registerTerminalTools() {
     registerTool(new RunInTerminalToolAdapter());
     registerTool(new GetTerminalOutputTool());
+  }
+
+  /**
+   * Register the tools contributed by runtime inspection providers. A provider (such as CSIDE) declares its own tools
+   * generically via {@link IRuntimeInspectionService#getToolDescriptors()}; Copilot exposes each declared tool to the
+   * language server. Tools are only registered once a provider is available, so installations without a provider are
+   * unaffected. Copilot holds no runtime-specific knowledge here.
+   */
+  private void registerRuntimeInspectionTools() {
+    RuntimeInspectionServiceManager manager = RuntimeInspectionServiceManager.getInstance();
+    if (manager == null) {
+      return;
+    }
+
+    runtimeServiceListener = new RuntimeInspectionServiceManager.RuntimeServiceListener() {
+      @Override
+      public void onServiceAvailable(IRuntimeInspectionService service) {
+        if (registerProviderTools(service)) {
+          registerToolWithServer();
+        }
+      }
+    };
+    // Notifies immediately if a provider is already registered.
+    manager.addListener(runtimeServiceListener);
+  }
+
+  /**
+   * Registers a {@link RuntimeProviderTool} for each tool the provider declares. Tools already registered (by name) are
+   * skipped so repeated availability notifications are idempotent.
+   *
+   * @param service the runtime provider
+   * @return {@code true} if at least one new tool was registered
+   */
+  private boolean registerProviderTools(IRuntimeInspectionService service) {
+    if (service == null) {
+      return false;
+    }
+    List<RuntimeToolDescriptor> descriptors;
+    try {
+      descriptors = service.getToolDescriptors();
+    } catch (RuntimeException e) {
+      CopilotCore.LOGGER.error("Failed to read runtime provider tool descriptors", e);
+      return false;
+    }
+    if (descriptors == null || descriptors.isEmpty()) {
+      return false;
+    }
+    boolean registeredAny = false;
+    synchronized (this) {
+      for (RuntimeToolDescriptor descriptor : descriptors) {
+        if (descriptor == null || descriptor.getName() == null || tools.containsKey(descriptor.getName())) {
+          continue;
+        }
+        registerTool(new RuntimeProviderTool(service, descriptor));
+        registeredAny = true;
+      }
+    }
+    return registeredAny;
   }
 
   /**
@@ -358,6 +424,12 @@ public class AgentToolService implements ToolInvocationListener, TerminalService
     TerminalServiceManager terminalManager = TerminalServiceManager.getInstance();
     if (terminalManager != null) {
       terminalManager.removeListener(this);
+    }
+
+    // Remove listener from runtime inspection service manager
+    RuntimeInspectionServiceManager runtimeManager = RuntimeInspectionServiceManager.getInstance();
+    if (runtimeManager != null && runtimeServiceListener != null) {
+      runtimeManager.removeListener(runtimeServiceListener);
     }
 
     this.tools.clear();
